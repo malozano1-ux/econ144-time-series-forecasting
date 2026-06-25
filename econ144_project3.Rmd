@@ -1,0 +1,346 @@
+---
+title: "Forecasting the USD/COP Exchange Rate Using Time Series Models"
+author: "Manuela Lozano"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+
+# Introduction
+
+## Background Information
+
+Exchange rates play an important role in international trade, investment, and macroeconomic stability. The exchange rate between the Colombian peso (COP) and the US dollar (USD) is particularly relevant for Colombia because it affects inflation, exports, and financial flows. Exchange rates are influenced by several economic factors, including interest rates, inflation, commodity prices, and investor expectations. Because of these influences, exchange rates often display persistent trends and volatility, making them challenging to predict. 
+
+
+## Description of the Dataset 
+
+```{r, message=FALSE, warning=FALSE}
+library(fpp3)
+library(tidyverse)
+library(quantmod)
+library(lubridate)
+library(fredr)
+
+# load data
+cop_usd <- getSymbols("COLCCUSMA02STM", src = "FRED", auto.assign = FALSE)
+
+# clean data
+exchange_ts <- data.frame(
+  Date = index(cop_usd),
+  rate = as.numeric(cop_usd[, 1])
+) %>%
+  drop_na() %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble(index = Date) %>%
+  fill_gaps() %>%
+  filter(Date >= yearmonth("1995 Jan")) %>%
+  mutate(log_rate = log(rate))
+
+# remove NA's
+exchange_ts <- exchange_ts %>%
+  fill_gaps()
+
+# convert to tsibble
+exchange_ts <- exchange_ts %>%
+  as_tsibble(index = Date)
+
+exchange_ts
+```
+
+This project uses monthly data on the USD/COP exchange rate obtained from the Federal Reserve Economic Data (FRED) database. The analysis focuses on observations from 1995 onward to reflect the modern exchange rate regime in Colombia. The exchange rate series is transformed using the natural logarithm in order to stabilize variance and improve the performance of forecasting models. 
+
+The data set is divided into a training sample and a test sample. Observations before January 2022 are used to estimate the models, while data from January 2022 onward are used to evaluate out-of-sample forecasting performance. 
+
+
+## Methods that are Being Used
+
+Several time-series forecasting methods are used to model the exchange rate. These include ARIMA, exponential smoothing (ETS), Holt-Winters, neural network autoregression (NNETAR), and Prophet models. In addition, a forecast combination is constructed ny averaging forecasts from multiple models. Model performance is evaluated using forecast accuracy measures such as RMSE, MAE, and MAPE.
+
+
+## Research Question
+
+The main objective of this project is to determine which forecasting model provides the most accurate predictions for the USD/COP exchange rate. 
+
+The research question guiding the analysis is: **Which time-series forecasting method produces the most accurate out-of-sample forecasts for the USD/COP exchange rate?**
+
+
+---
+
+# Results 
+
+## Time Series Plot
+
+```{r, message=FALSE, warning=FALSE}
+# plot exchange rate
+exchange_ts %>%
+  autoplot(log_rate) +
+  labs(
+    title = "Log Monthly USD/COP Exchange Rate",
+    y = "Log Exchange Rate",
+    x = "Date"
+  )
+```
+
+**Interpretation:**
+
+The time series plot of the log USD/COP exchange rate shows a persistent upward trend over the sample period, reflecting the long-run depreciation of the Colombian peso relative to the US dollar. The series increases steadily from the mid-1990s to the mid-2000s, followed by periods of fluctuations and renewed depreciation after 2014. The variability of the series also appears to increase over time, which motivates the use of a logarithmic transformation to stabilize variance before modeling. Overall, the series exhibits strong persistence, suggesting that it may be non-stationary and requiring further diagnostic analysis. 
+
+
+## Train/Test Split
+
+```{r, message=FALSE, warning=FALSE}
+# create training data
+train <- exchange_ts %>%
+  filter(Date < yearmonth("2022 Jan"))
+
+test <- exchange_ts %>%
+  filter(Date >= yearmonth("2022 Jan"))
+```
+
+**Interpretation:**
+
+To evaluate the forecasting performance of the models, the data set was divided into a training and testing sample. Observations prior to January 2022 were used as the training sample, while observations from January 2022 onward were reserved for the test sample to evaluate out-of-sample forecast accuracy. This approach allows the models to be compared based on their ability to predict unseen data rather than simply fitting historical observations. 
+
+
+## Stationarity and ACF/PACF
+
+```{r, message=FALSE, warning=FALSE}
+library(tseries)
+
+adf.test(train$log_rate)
+
+train %>%
+  gg_tsdisplay(log_rate, plot_type = "partial")
+
+train %>%
+  mutate(diff_log_rate = difference(log_rate)) %>%
+  gg_tsdisplay(diff_log_rate, plot_type = "partial")
+```
+
+**Interpretation:**
+
+The Augmented Dickey-Fuller test was used to evaluate whether the log exchanged rate series is stationary. The test produced a p-value of approximately 0.53, meaning that the null hypothesis of a unit root cannot be rejected. This suggests that the log exchange rate series is non-stationary.
+
+The ACF pot also shows slowly decaying autocorrelations across many lags, which is consistent with a high persistent time series. After first differencing the series, the autocorrelations decline substantially and fluctuate around zero, indicating that differencing helps remove much of the persistence in the data. These results suggest that models capable of handling non-stationary time series, such as ARIMA or exponential smoothing models, are appropriate for forecasting the exchange rate. 
+
+
+## STL Decomposition
+
+```{r, message=FALSE, warning=FALSE}
+train %>%
+  model(STL(log_rate)) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL Decomposition of the Log Exchange Rate")
+```
+
+**Interpretation:**
+
+The STL decomposition separates the log exchange rate into trend, seasonal, and remainder components. The results show that the dominant feature of the series is its long-run trend rather than strong seasonal patterns. The seasonal component is relatively small, suggesting that exchange rate movements are primarily driven by long-term economic forces and short-term shocks rather than predictable seasonal cycles.
+
+
+## Fit the Required Forecasting Models
+
+```{r, message=FALSE, warning=FALSE}
+library(fpp3)
+library(prophet)
+
+fit_models <- train %>%
+  model(
+    arima = ARIMA(log_rate),
+    ets = ETS(log_rate),
+    hw = ETS(log_rate ~ error("A") + trend("A") + season("A")),
+    nnetar = NNETAR(log_rate),
+    prophet = decomposition_model(
+      STL(log_rate),
+      ETS(season_adjust ~ error("A") + trend("A") + season("N"))
+    )
+  )
+```
+
+
+## Residuals Diagnostics
+
+```{r, message=FALSE, warning=FALSE}
+augment(fit_models) %>%
+  filter(.model == "arima") %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(
+    title = "Residuals vs Fitted: ARIMA",
+    x = "Fitted Values",
+    y = "Residuals"
+  )
+
+# ljung-box test
+augment(fit_models) %>%
+  group_by(.model) %>%
+  features(.resid, ljung_box, lag = 12)
+```
+
+**Interpretation:**
+
+Residual diagnostics were conducted to evaluate whether the models adequately captured the dynamics of the exchange rate series. The residual vs. fitted plot for the ARIMA model shoes that the residuals are generally centered around zero without strong systematic patterns, although the spread of the residuals increases slightly for larger fitted values.
+
+The Ljung-Box test was applies to the residuals of each model to detect remaining autocorrelation. The ARIMA model produces a relatively large p-value (0.486), suggesting that its residuals are closer to white noise. In contrast, several other models show statistically significant p-values, indicating that smoe residual autocorrelation remains.
+
+However, exchange rate data are well known to exhibit strong persistence and structural changes over time, making it common for forecasting models to leave some residual dependence. Therefore, model selection is based primarily on out-of-sample forecasting performance rather than residual diagnistics alone. 
+
+
+## Create Forecast
+
+```{r, message=FALSE, warning=FALSE}
+fc_models <- fit_models %>%
+  forecast(new_data = test)
+
+# plot forecast
+fc_models %>%
+  autoplot(train) +
+  autolayer(test, log_rate, color = "black") +
+  labs(
+    title = "Forecasts vs Actual Values",
+    y = "Log Exchange Rate",
+    x = "Date"
+  )
+
+# view accuracy
+train_acc <- fit_models %>%
+  accuracy()
+
+test_acc <- fc_models %>%
+  accuracy(test)
+
+train_acc
+test_acc
+```
+
+**Interpretation:**
+
+Forecast accuracy was evaluated using the test sample and several performance metrics, including RMSE, MAE, and MAPE. Among the individual forecasting models, the ETS model produced the lowest forecasting errors across all metrics. In particular, the ETS model achieved an RMSE of 0.0734 and an MAE of 0.0552, which are substantially lower than the corresponding errors of the other models.
+
+ARIMA performed moderately well but generated larger forecast errors than ETS. Holt-Winters and NNETAR produced even larger errors, suggesting that these models were less effective at capturing the dynamics of the exchange rate series. Prophet also generated relatively high forecasting errors compared with the other models. 
+
+
+## Combination Forecast
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Convert forecasts to tibble
+fc_df <- as_tibble(fc_models)
+
+# Reshape so each model forecast is its own column
+fc_wide <- fc_df %>%
+  select(Date, .model, .mean) %>%
+  pivot_wider(names_from = .model, values_from = .mean)
+
+# Create simple average combination forecast
+combo_fc <- fc_wide %>%
+  mutate(combo = (arima + ets + nnetar) / 3)
+
+# Merge with actual test values
+combo_compare <- combo_fc %>%
+  left_join(
+    as_tibble(test) %>% select(Date, log_rate),
+    by = "Date"
+  )
+
+# Compute forecast accuracy for the combination
+combo_rmse <- sqrt(mean((combo_compare$log_rate - combo_compare$combo)^2, na.rm = TRUE))
+combo_mae  <- mean(abs(combo_compare$log_rate - combo_compare$combo), na.rm = TRUE)
+combo_mape <- mean(abs((combo_compare$log_rate - combo_compare$combo) / combo_compare$log_rate), na.rm = TRUE) * 100
+
+# Display combination accuracy
+combo_accuracy <- tibble(
+  .model = "combination",
+  .type  = "Test",
+  RMSE   = combo_rmse,
+  MAE    = combo_mae,
+  MAPE   = combo_mape
+)
+
+combo_accuracy
+
+# Compare combination against individual model test accuracy
+test_compare <- test_acc %>%
+  select(.model, .type, RMSE, MAE, MAPE) %>%
+  bind_rows(combo_accuracy)
+
+test_compare
+
+# Plot combination forecast against actual values
+ggplot(combo_compare, aes(x = Date)) +
+  geom_line(aes(y = log_rate, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = combo, color = "Combination Forecast"), linewidth = 1) +
+  labs(
+    title = "Combination Forecast vs Actual Values",
+    x = "Date",
+    y = "Log Exchange Rate",
+    color = ""
+  ) +
+  theme_minimal()
+
+# plot combination with ETS for comparison
+ggplot(combo_compare, aes(x = Date)) +
+  geom_line(aes(y = log_rate, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = ets, color = "ETS Forecast"), linewidth = 1) +
+  geom_line(aes(y = combo, color = "Combination Forecast"), linewidth = 1) +
+  labs(
+    title = "ETS vs Combination Forecast",
+    x = "Date",
+    y = "Log Exchange Rate",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+**Interpretation:**
+
+In addition to the individual forecasting models, a sample forecast combination was constructed by averaging the predictions from the ARIMA, ETS, and NNETAR models. Forecast combinations are often used to improve predictive performance by combining models with different assumptions and forecasting structures. 
+
+The combination forecast produced an RMSE of 0.0807 and an MAE of 0.0585 on the test sample. While the combined forecast performs better than several individual models, it still produces slightly larger forecast error than the ETS model. This indicates that the ETS model remains the most accurate forecasting approach for this data set. 
+
+Based on the out-of-sample performance, the ETS model is selected as the preferred forecasting model for the USD/COP exchange rate. The ETS model achieved the lowest RMSE, MAE, and MAPE among all candidate models, indicating superior predictive accuracy the test sample. Therefore, the ETS model provides the most reliable forecasts for the exchange rate in this analysis.
+
+
+---
+
+
+# Conclusion 
+
+## Final Thoughts 
+
+This project analyzed and forecasted the USD/COP exchange rate using several time-series models. The results indicate that the exchange rate exhibits strong persistence and a long-term trend, which are common characteristics of financial time series. Among the models evaluated, the exponential smoothing (ETS) model produced the most accurate forecasts on the test sample, achieving the lowest forecast errors compared with the other models. 
+
+While the forecast combination performed reasonably well, it did not outperform the ETS model individually. Overall, the results suggest that exponential smoothing methods are effective for forecasting the USD/COP exchange rate in this data set.
+
+
+## Future Work
+
+Future research could improve forecasting performance by incorporating additional macroeconomic variables, such as inflation, interest rates, or commodity prices. More advanced modeling approaches, including multivariate time-series models or machine learning techniques, could also be explored to better capture the economic forces influencing exchange rate movements.
+
+
+---
+
+
+# References 
+
+* Banco de la República. (2006). Exchange rate pass-through into import prices: Evidence from Colombia (Borradores de Economía No. 253). Banco de la República. https://www.banrep.gov.co/en/borrador-253
+
+* Federal Reserve Bank of St. Louis. (2024). Colombia/U.S. foreign exchange rate (COLCCUSMA02STM). FRED, Federal Reserve Economic Data. https://fred.stlouisfed.org/series/COLCCUSMA02STM
+
+* Hayes, A. (2024). Factors that influence exchange rates. Investopedia. https://www.investopedia.com/trading/factors-influence-exchange-rates/
+
+* Hong Kong Monetary Authority. (2008). Forecasting exchange rates: Models and applications (HKMA Working Paper No. 08/2008). Hong Kong Monetary Authority. https://www.hkma.gov.hk/media/eng/publication-and-research/research/working-papers/HKMAWP08_08_full.pdf

@@ -1,0 +1,439 @@
+---
+title: "Forecasting Monthly U.S. Retail Sales"
+author: "Manuela Lozano"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Introduction
+
+## Background
+
+Retail sales measure the total receipts of retail stores and food services and serve as one of the most widely followed indicators of consumer spending. Because household consumption represents a large share of overall economic activity, changes in retail sales provide timely insight into the strength of the economy and the behavior of consumers. As described by **Investopedia**, retail sales data are closely monitored by policymakers, economist, and financial markets to assess economic momentum and identify potential expansions or slowdowns. Seasonal factors such as holidays, income cycles, and promotional periods play a significant role in shaping retail sales patterns, making the series particularly suited for time-series analysis.
+
+## About the Data
+
+```{r, error=TRUE}
+# Load libraries
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+
+# Loading the data
+retail <- read.csv("~/Documents/UCLA/YEAR 4/WINTER 2026/ECON 144/Project 1/RSAFS.csv")
+
+# Rename column names 
+colnames(retail) <- c("date", "retail_sales")
+
+# Convert dates
+retail <- retail %>%
+  mutate(date = as.Date(date)) %>%
+  drop_na()
+
+# Convert to time series object
+retail_ts <- ts(
+  retail$retail_sales,
+  start = c(year(min(retail$date)), month(min(retail$date))),
+  frequency = 12
+)
+
+head(retail)
+```
+
+
+**Description of the data:**
+
+The data used in this project consist of monthly U.S. retail sales and food services, obtained from the Federal Reserve Economic Data (FRED) database (series RSAFS). The series is measured in millions of dollars and spans multiple decades, providing sufficient observations to analyze both long-term trends and seasonal behavior. A monthly frequency is particularly well suited for studying seasonality, as it allows for the identification of recurring yearly patterns in consumer spending.
+
+
+## Research Question
+
+This project addresses the following research question:
+
+**How can trend and seasonal components in U.S. retail sales be modeled and removed to produce reliable short-term forecasts, and what types of dynamics remain after these components are accounted for?**
+
+Specifically, the analysis examines whether additive or multiplicative seasonal structures better characterize the data and evaluates how remaining residual dynamics inform the choice of forecasting models. 
+
+# Results
+
+## Modeling and Forecasting Trend
+
+### Time Series Plot
+
+```{r, error=TRUE}
+# Plot time series
+autoplot(retail_ts) +
+  labs(
+    title = "Monthly U.S. Retail Sales",
+    x = "Year",
+    y = "Retail Sales (Millions of Dollars)"
+  ) +
+  theme_minimal()
+```
+
+### Covariance Stationary
+
+
+**Interpretation:**
+
+The data shows a strong long-run upward trend reflecting population growth, inflation, and rising consumption, as well as pronounced seasonal fluctuations associated with recurring events such as holiday season. 
+
+
+```{r, warning=FALSE, error=TRUE}
+# Augmented Dickey-Fuller test
+adf.test(retail_ts)
+```
+
+**Interpretation:**
+
+Since the p-value (0.99) is much greater than 0.05, we fail to reject the null hypothesis of a unit root. This result is consistent with the definition of covariance stationarity, which requires a constant mean and autocovariances that depend only on lag, not time. This result is consistent with the time series plot, which shows a strong upward trend and pronounced seasonal fluctuations over time. Therefore, the series violates the stationarity assumption due to both trend and seasonality.
+
+### ACF and PACF
+
+```{r, error=TRUE}
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(retail_ts, main = "ACF of Retail Sales")
+pacf(retail_ts, main = "PACF of Retail Sales")
+par(mfrow = c(1, 1))
+```
+
+**Interpretations:**
+
+-   **ACF:** The autocorrelation function displays very high persistence, with correlations remaining large and significant across many lags. This slow decay is characteristic of a non-stationary time series with a strong trend component.
+
+-   **PACF:** The partial autocorrelation function shows a large spike at the first lag, followed by relatively small and insignificant values at higher lags. This pattern further supports the presence of a deterministic trend rather than a short-memory stationary process.
+
+
+### Fit Linear and Nonlinar Models
+
+```{r, error=TRUE}
+# Create time index
+t <- 1:length(retail_ts)
+
+# Linear trend model
+linear_model <- lm(retail_ts ~ t)
+
+# Quadratic trend model
+quad_model <- lm(retail_ts ~ t + I(t^2))
+```
+
+### Fitted Values of each Model
+
+```{r, error=TRUE}
+# Fitted values (numeric vectors)
+linear_fit <- fitted(linear_model)
+quad_fit   <- fitted(quad_model)
+
+# Convert fitted values to ts objects so autoplot/autolayer works
+linear_fit_ts <- ts(linear_fit, start = start(retail_ts), frequency = 12)
+quad_fit_ts   <- ts(quad_fit,   start = start(retail_ts), frequency = 12)
+
+# Plot original series with both fitted trends
+autoplot(retail_ts) +
+  autolayer(linear_fit_ts, series = "Linear Trend", color = "red") +
+  autolayer(quad_fit_ts,   series = "Quadratic Trend", color = "royalblue") +
+  labs(
+    title = "Retail Sales with Linear and Quadratic Trend Fits",
+    x = "Year",
+    y = "Retail Sales"
+  ) +
+  theme_minimal()
+```
+
+### Residuals vs Fitted Values
+
+```{r, error=TRUE}
+# Residuals
+linear_resid <- resid(linear_model)
+quad_resid   <- resid(quad_model)
+
+par(mfrow = c(1, 2))
+
+plot(linear_fit, linear_resid,
+     main = "Linear Model: Residuals vs Fitted",
+     xlab = "Fitted Values",
+     ylab = "Residuals")
+abline(h = 0, col = "red")
+
+plot(quad_fit, quad_resid,
+     main = "Quadratic Model: Residuals vs Fitted",
+     xlab = "Fitted Values",
+     ylab = "Residuals")
+abline(h = 0, col = "red")
+
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+For the linear model, the residuals exhibit a clear systematic pattern rather than random dispersion around zero, indicating that the linear specification fails to fully capture the underlying trend in retail sales. In contrast, the quadratic model reduces some of this structure, although residual patterns remain, suggesting remaining un-modeled components such as seasonality. Overall, the quadratic model provides a better fit than the linear model, but neither model fully eliminates dependence in the residuals.
+
+### Histogram of Residuals
+
+```{r, error=TRUE}
+par(mfrow = c(1, 2))
+
+hist(linear_resid,
+     main = "Linear Model Residuals",
+     xlab = "Residuals",
+     breaks = 30)
+
+hist(quad_resid,
+     main = "Quadratic Model Residuals",
+     xlab = "Residuals",
+     breaks = 30)
+
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+-   **Linear Model:** The linear model residuals are more concentrated around zero but remain left-skewed, suggesting that extreme negative deviations occur more frequently than positive ones.
+
+
+-   **Quadratic Model:** The histogram of residuals from the quadratic model shows noticeable skewness and heavier tails, indicating deviations from normality.
+
+These results indicate that while the quadratic trend improves the fit, the residuals are still not perfectly normally distributed, likely due to un-modeled seasonal effects and structural shocks.
+
+### Diagnostic Statistics
+
+```{r, error=TRUE}
+# Model summaries
+summary(linear_model)
+summary(quad_model)
+```
+
+**Interpretation:**
+
+-   **Linear Model:**
+
+    -   All Beta's are significant
+
+    -   R-squared: 0.9288
+
+    -   Adjusted R-squared: 0.9286
+
+-   **Quadratic Model:**
+
+    -   All Beta's are significant
+
+    -   R-squared: 0.9666
+
+    -   Adjusted R-squared: 0.9664
+
+Comparing the two models, the quadratic trend clearly outperforms the linear trend in terms of goodness of fit. The quadratic model achieves a higher R-squared and adjusted R-squared, indicating that it explains a substantially larger proportion of the variation in retail sales. Additionally, the residual standard error is considerably smaller for the quadratic model, suggesting improved explanatory power. These results imply that retail sales growth is better characterized by a nonlinear trend rather than a simple linear increase.
+
+### Selecting a Model (AIC/BIC)
+
+```{r, error=TRUE}
+# AIC and BIC comparison
+AIC(linear_model, quad_model)
+BIC(linear_model, quad_model)
+```
+
+**Choose Best Model:**
+
+The quadratic model has the smallest AIC/BIC, therefore it provides a better fit to the data than the linear model.
+
+### Forecasting with Trend-Only Model
+
+```{r, error=TRUE}
+library(forecast)
+
+h <- 12
+
+# Trend-only model (quadratic)
+m_quad <- tslm(retail_ts ~ trend + I(trend^2))
+
+# Forecast 12 steps ahead (includes prediction intervals)
+fc_quad <- forecast(m_quad, h = h, level = 95)
+
+# Plot forecasts
+autoplot(fc_quad) +
+  labs(title = "12-Month Forecast: Quadratic Trend Model",
+       x = "Year", y = "Retail Sales") +
+  theme_minimal()
+```
+
+**Interpretation:**
+
+Because this model excludes seasonality, the forecast captures long-run growth but does not reproduce seasonal fluctuations observed in the data.
+
+
+## Trend and Seasonal Adjustments
+
+### Additive Decomposition of Series
+
+```{r, warning=FALSE}
+# Additive decomposition
+add_decomp <- decompose(retail_ts, type = "additive")
+
+# Plot additive decomposition
+autoplot(add_decomp) +
+  labs(title = "Additive Decomposition of U.S. Retail Sales") +
+  theme_minimal()
+```
+
+**Interpretation:**
+
+-   **Trend:** The trend component shows a steady long-run increase in U.S. retail sales, reflecting sustained growth in consumer spending over time, with noticeable slowdowns during economic downturns such as the Great Recession and the COVID-19 period.
+
+-   **Seasonality:** The seasonal component displays regular and repeating monthly fluctuations that remain relatively constant in magnitude, consistent with recurring patterns in consumer behavior throughout the year.
+
+-   **Remainder:** The remainder component captures short-term irregular movements and shocks not explained by the trend or seasonal components, including large negative deviations around 2020.
+
+### Remove the Trend and Seasonality
+
+```{r}
+# Additive detrended & deseasonalized residuals
+add_resid <- add_decomp$random
+add_resid <- na.omit(add_resid)
+
+# ACF and PACF of additive residuals
+par(mfrow = c(1, 2))
+forecast::tsdisplay(add_resid, main = "Additive residuals")
+Box.test(add_resid, lag = 12, type = "Ljung-Box")
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+-   **ACF:** The autocorrelation function of the additive residuals shows reduced persistence compared to the original series, but some significant correlations remain, indicating that not all temporal dependence has been removed.
+
+-   **PACF:** The partial autocorrelation function displays small spikes at low lags, suggesting limited remaining structure in the residuals. This indicates that the additive decomposition removes much of the trend and seasonality, though some dependence remains.
+
+-   **Box-Ljung test:** The Box-Ljung test highly rejects the Null hypothesis of no serial correlation (chi-squared = 290.94 and p-value < 2.2e-16). This indicates that after removing the trend and seasonal components, the residuals are not white noise, but exhibit significant short run dependence, consistent with cyclical dynamics. 
+
+
+### Multiplicative Decomposition of Series
+
+```{r}
+# Multiplicative decomposition
+mult_decomp <- decompose(retail_ts, type = "multiplicative")
+
+# Plot multiplicative decomposition
+autoplot(mult_decomp) +
+  labs(title = "Multiplicative Decomposition of U.S. Retail Sales") +
+  theme_minimal()
+```
+
+**Interpretation:**
+
+-   **Trend:** The trend component closely mirrors the long-term growth observed in the additive decomposition, capturing the sustained upward movement in retail sales over time.
+
+-   **Seasonality:** The seasonal component varies proportionally with the level of the series, indicating that seasonal fluctuations increase as overall retail sales rise. This behavior aligns with the observed data pattern.
+
+-   **Remainder:** The remainder component is more stable and exhibits less heteroskedasticity compared to the additive case, suggesting that the multiplicative framework better captures the underlying structure of the data.
+
+### Remove the Trend and Seasonality
+
+```{r}
+# Multiplicative detrended & deseasonalized residuals
+mult_resid <- mult_decomp$random
+mult_resid <- na.omit(mult_resid)
+
+# ACF and PACF of multiplicative residuals
+par(mfrow = c(1, 2))
+forecast::tsdisplay(mult_resid)
+Box.test(mult_resid, lag = 12, type = "Ljung-Box")
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+-   **ACF:** The autocorrelation function of the multiplicative residuals shows minimal significant correlations, indicating that most systematic structure has been removed.
+
+-   **PACF:** The partial autocorrelation function displays no strong spikes, suggesting that the residuals are close to white noise. This implies that the multiplicative decomposition provides a more effective removal of trend and seasonality than the additive decomposition.
+
+-   **Box-Ljung test:** The Box-Ljung test also rejects the null hypothesis of no serial correlation for the multiplicative resudials (chi-squared = 258.39 and p-value < 2.2e-16). This suggests that, while the trend and seasonality have been removed, the remaining series contains short memory dependence that could be modeled using the time-series method. 
+
+
+### Which Decomposition is Better?
+
+The multiplicative decomposition is more appropriate for this series. As the level of retail sales increases over time, the magnitude of seasonal fluctuations also increases, violating the constant-seasonality assumption of the additive model. The multiplicative model better reflects the proportional nature of seasonal effects in retail sales. Although both the decomposition leave residuals with serial correlation, the multiplicative decomposition shows slightly weaker dependence, providing mild support for the multiplicative specification. 
+
+### Cycles of Models Similar?
+
+The cyclical components implied by the additive and multiplicative decomposition are similar in timing but differ in scale. While both identify comparable periods of expansion and contraction, the multiplicative model measures deviations proportionally rather than in absolute terms, making it more economically meaningful for a growing time series.
+
+### Plot Seasonal Factors
+
+```{r}
+# Seasonal components
+season_add  <- add_decomp$seasonal
+season_mult <- mult_decomp$seasonal
+
+# Plot seasonal factors
+par(mfrow = c(1, 2))
+
+plot(season_add,
+     main = "Additive Seasonal Component",
+     ylab = "Seasonal Effect",
+     xlab = "Month")
+
+plot(season_mult,
+     main = "Multiplicative Seasonal Component",
+     ylab = "Seasonal Factor",
+     xlab = "Month")
+
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+The seasonal factors reveal strong and consistent monthly patterns in retail sales. Sales tend to peak toward the end of the year, reflecting increased consumer spending during the holiday season, while lower values are observed in the early months of the year. The multiplicative seasonal factors show that these effects scale with the level of sales, reinforcing the suitability of a multiplicative seasonal structure.
+
+### Final Model
+
+```{r}
+library(forecast)
+
+# Final model: nonlinear trend + seasonality
+final_model <- tslm(retail_ts ~ trend + I(trend^2) + season)
+
+# 12-month forecast
+final_forecast <- forecast(final_model, h = 12, level = 95)
+
+# Plot final forecast
+autoplot(final_forecast) +
+  labs(
+    title = "Final 12-Month Forecast: Trend and Seasonal Model",
+    x = "Year",
+    y = "Retail Sales"
+  ) +
+  theme_minimal()
+```
+
+**Interpretation:**
+
+The final model, which incorporates a nonlinear trend and seasonal effects, provides a more realistic representation of U.S. retail sales dynamics. By accounting for both long-term growth and recurring seasonal fluctuations, the model produces forecasts that better align with historical patterns. The resulting 12-month forecast reflects continued growth in retail sales while preserving expected seasonal variation, making it the preferred specification for short-term forecasting.
+
+# Conclusion and Future Work
+
+This project analyzed monthly U.S. retail sales using time-series forecasting methods that explicitly account for trend and seasonality. The empirical results indicate that the reail sales series is not covariance stationary, a finding supported by both visual inspection and formal unit root testing. Autocorrelation analysis further revealed strong persistence consistent with a trending process rather than a short-memory stationary model. 
+
+Among the trend specifications considered, a quadratic trend model outperformed a linear trend in terms of goodness of fit and information criteria. However, residual diagnostics showed that trend-only models fail to fully capture the structure of the data due to the presence of strong seasonal patterns. Seasonal decomposition revealed that the magnitude of seasonal fluctuations increase with the level of the series, making a multiplicative seasonal structure more appropriate than an additive one. After removing trend and seasonality, the residuals remain serially correlated, indicating the presence of short-run cyclical dynamics rather than white noise.
+
+The final forecasting model, which combines nonlinear trend with seasonal effects, produced realistic 12 month ahead forecasts that preserve both long run growth and recurring seasonal variation. While this specification captures the dominant deterministic components of the series, the remaining residual dependence suggests that incorporating stochastic cyclical components may further improve model performance.
+
+Future work could extend this analysis by explicitly modeling the remaining short memory dynamics using autoregressive or moving average components, such as ARMA or ARIMA models. Additionally, allowing for structural breaks associated with major economic events, such as the Great Recession or the COVID-19 pandemic, may further improve forecasting performance and provide deeper insights into changes in consumer behavior over time. 
+
+# References
+
+- Investopedia. (n.d.). Retail sales. https://www.investopedia.com/terms/r/retail-sales.asp
+
+- Federal Reserve Bank of St. Louis. (n.d.). Retail sales: Retail sales and food services (RSAFS). FRED Economic Data. https://fred.stlouisfed.org/series/RSAFS
+
+- Rojas, R. R. (2026). Economics 144: Economic forecasting lecture notes. University of California, Los Angeles.

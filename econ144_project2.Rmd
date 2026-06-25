@@ -1,0 +1,651 @@
+---
+title: "Dynamic Interdependence and Forecasting Performance of U.S. Labor Market Indicators"
+author: "Manuela Lozano"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Introduction
+
+## Background Information
+
+Labor market indicators play a critical role in understanding macroeconomic conditions and forecasting business cycle dynamics. Among the most widely monitored measures are initial jobless claims and temporary help services employment. Initial jobless claims capture the number of individuals filing for unemployment insurances for the first time and serve as a high-frequency indicator of labor market distress. Because layoffs tend to increase rapidly during economic slowdowns, jobless claims are often views as an early signal of recessionary pressures. 
+
+Temporary help services employment reflects firms' short term hiring decisions and their response to fluctuations in demand. Firms frequently adjust temporary employment before making permanent staffing changes, making this variable highly sensitive to cyclical movements in the economy. Prior research suggests that temporary help employment may act as a leading of broader labor market conditions, as businesses tend to expand temporary staffing during recoveries and reduce it at the onset of downturns. 
+
+
+## Description of the Dataset 
+
+```{r, warning=FALSE, message=FALSE}
+library(fpp3)
+library(quantmod)
+
+# Initial Jobless Claims (weekly)
+getSymbols("ICSA", src = "FRED")
+
+# Temporary Help Employment (monthly)
+getSymbols("TEMPHELPS", src = "FRED")
+
+# Convert jobless claims to monthly average
+claims_monthly <- tibble(
+  date = as.Date(index(ICSA)),
+  claims = as.numeric(ICSA$ICSA)
+) %>%
+  mutate(date = yearmonth(date)) %>%
+  group_by(date) %>%
+  summarise(claims = mean(claims, na.rm = TRUE)) %>%
+  ungroup()
+
+temp_monthly <- tibble(
+  date = yearmonth(as.Date(index(TEMPHELPS))),
+  temp_help = as.numeric(TEMPHELPS$TEMPHELPS)
+)
+
+# Merge into Monthly Data
+labor_df <- left_join(claims_monthly, temp_monthly, by = "date") %>%
+  filter(!is.na(temp_help)) %>%
+  as_tsibble(index = date)
+```
+
+This study uses data obtained from the Federal Reserve Bank (FRED). The first series, Initial Claims (ICSA), measures weekly filing for unemployment insurance and is aggregated to a monthly frequency for consistency with the second series. The second series, All Employees: Temporary Help Services (TEMPHELPS), is available at a monthly, seasonally adjusted frequency and measures total employment in the temporary help services sector.
+
+Both series are transformed into logarithms to stabilize variance and allow for interpretation in approximate percentage terms. To analyze dynamic behavior and ensure stationary in multivariate modeling, first differences of the log-transformed series are used in the VAR framework. The sample period spans multiple economic cycles, including the COVID-19 recession, which allows the analysis to capture both typical cyclical movements and large structural shocks. 
+
+
+## Methods that are Being Used
+
+This project applies both univariate and multivariate time-series methods. First, structured ARIMA models incorporating deterministic trend, seasonal components, and an intervention variable for the COVID-19 shock are estimated for each series. These models are compared to automatic ARIMA specifications selected via information criteria. Forecast performance is evaluated using out-of-sample Mean Absolute Percentage Error (MAPE), and forecast combinations are also considered.
+
+Second, a Vector Autoregression (VAR) model is estimated using the first differences of the log-transformed variable to capture their joint dynamics. Lag length is selected suing information criteria. The VAR framework allows for examination of impulse response functions to assess how shocks propagate between the variables, as well as Granger causality test to determine one variable contains predictive information about the other. Forecasts from the VAR model are compared to those from the univariate models. 
+
+
+## Research Question
+
+The central research question of this study is whether temporary help services employment contains predictive information about future movements in jobless claims and whether modeling the join dynamics of these variables improve short-term forecasting performance. Specifically, the analysis evaluates whether temporary employment acts as a leading indicator of labor market stress and whether a multivariate VAR framework provides superior forecast relative to univariate ARIMA models . 
+
+---
+
+# Results 
+
+## Time Series Plots
+
+```{r, warning=FALSE, message=FALSE}
+# Jobless Claims
+autoplot(labor_df, claims) +
+  labs(title = "Monthly Initial Jobless Claims",
+       y = "Claims",
+       x = "Date")
+
+# Temporary Help Employment
+autoplot(labor_df, temp_help) +
+  labs(title = "Temporary Help Employment",
+       y = "Employment (Thousands)",
+       x = "Date")
+```
+
+The time series plots show clear cyclical behavior in both jobless claims and temporary help employment. Jobless claims exhibit sharp spikes during recessionary periods, most notably during the COVID-19 shock in 2020, where claims surged to historically unprecedented levels. Outside of crisis periods, claims fluctuate within a relatively stable range, consistent with business cycle dynamics. Temporary help employment dusplays strong cyclical patterns as well, increasing steadily during expansions and declining during downturns. Unlike claims, temporary employment dhows smoother long-run movements, reflecting firms' hiring adjustments over the cycle. The pronounced contraction during COVID-19 recession further highloghts the sensitivity of temporary employment to macroeconomic shocks. 
+
+
+## ACF and PACF Plots
+
+```{r, warning=FALSE, message=FALSE}
+library(feasts)
+
+# Jobless Claims
+acf(labor_df$claims, main = "ACF: Jobless Claims")
+pacf(labor_df$claims, main = "PACF: Jobless Claims")
+
+# Temporary Help Employment
+acf(labor_df$temp_help, main = "ACF: Temporary Help Employment")
+pacf(labor_df$temp_help, main = "PACF: Temporary Help Employment")
+```
+
+The ACF plots for both series show strong persistence, with autocorrelations decaying slowly across lags. This pattern suggests non-stationary and the presence of trend components. The PACF for jobless claims shows significant spikes at early lags, consistent with AR-type dynamics. Temporary help employment also exhibits strong serial correlation, reinforcing the need for differencing or inclusion of deterministic trend components in the modeling process. Overall, the ACF and PACF patterns justify the use of ARIMA specifications with autoregressive and moving average terms. 
+
+
+## STL Decomposition
+
+```{r, warning=FALSE, message=FALSE}
+library(fpp3)
+
+# Jobless Claims
+labor_df2 <- labor_df %>%
+  mutate(
+    log_claims = log(claims),
+    log_temp   = log(temp_help)
+  )
+
+# STL for jobless claims (log scale)
+labor_df2 %>%
+  model(stl_claims = STL(log_claims)) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL Decomposition: log(Jobless Claims)")
+
+# Temporary Help Employment
+# STL for temp help employment (log scale)
+labor_df2 %>%
+  model(stl_temp = STL(log_temp)) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL Decomposition: log(Temporary Help Employment)")
+```
+
+The STL decomposition reveals distinct trend, seasonal, and remainder components in both series. For jobless claims, the trend component captures gradual cyclical movements over time, with a dramatic spike during the COVID-19 period. The seasonal component shows refular annual fluctuations, indicating recurring within-year patterns in claims filing. The remainder component  contains irregular shocks most preeminently during 2020. 
+
+For temporary help employment, the trend component reflects steady growth during expansions and contractions during recessions. Seasonal fluctuations are present but relatively modest compared to jobless claims. The decomposition confirms that both variables exhibit trend and seasonality, supporting the structured ARIMA modeling approach. 
+
+
+## Fit Model
+
+```{r, warning=FALSE, message=FALSE}
+library(fpp3)
+
+# 1) Make sure covid exists
+labor_df2 <- labor_df2 %>%
+  mutate(covid = if_else(date >= yearmonth("2020 Mar") & date <= yearmonth("2020 Jun"), 1, 0))
+
+# 2) Fit models (claims)
+fit_claims <- labor_df2 %>%
+  model(
+    claims_tsc  = ARIMA(log_claims ~ trend() + season() + covid),
+    claims_auto = ARIMA(log_claims)
+  )
+
+# 3) Fit models (temp help)
+fit_temp <- labor_df2 %>%
+  model(
+    temp_tsc  = ARIMA(log_temp ~ trend() + season() + covid),
+    temp_auto = ARIMA(log_temp)
+  )
+
+# 4) Report each model
+fit_claims %>% dplyr::select(claims_tsc)  %>% report()
+fit_claims %>% dplyr::select(claims_auto) %>% report()
+
+fit_temp %>% dplyr::select(temp_tsc)  %>% report()
+fit_temp %>% dplyr::select(temp_auto) %>% report()
+
+# Show a clean table of model orders + AICc, etc.
+glance(fit_claims)
+glance(fit_temp)
+```
+
+The structured ARIMA model (claims_tsc) substatioally outperforms the automatic ARIMA model for jobless claims in trend of AIC and AICc (-799 vs. -542). The inclusion of trend, seasonal effects, and COVID intervention imporves model fit and reduces residual variance. Similarly, for temporary help employment, the structured model initially provides strong fit, though diagnostics test later indicate residual autocorrelation. The revised model (temp_tsc2), which allows ARIMA differencing to capture persistence, achives a lower AIC (-2064.82) and improved residual diagnostics. These results suggest that incorporating economic structure and intervention effects enhances model performance relative to purely automated specifications. 
+
+
+## Fit Residuals
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+
+# Jobless Claims
+# Extract augmented data
+claims_aug <- augment(fit_claims) %>%
+  filter(.model == "claims_tsc")
+
+ggplot(claims_aug, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Fitted: Jobless Claims Model",
+       x = "Fitted Values",
+       y = "Residuals")
+
+# Temporary Help Employment 
+temp_aug <- augment(fit_temp) %>%
+  filter(.model == "temp_tsc")
+
+ggplot(temp_aug, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Fitted: Temp Help Employment Model",
+       x = "Fitted Values",
+       y = "Residuals")
+```
+
+The residuals vs. fitted plots show that residuals are generally centered around zero with no clear systematic pattern, indicating that the models capture the main dynamics of the data. For jobless claims, residual dispersion appears relatively constant except for larger deviations during the COVID period. For temporary help employment, residuals are tightly clusters around zero, particualrly in the revised specification. Overall, the absence of visible structure in the residual plots suggest that the models are appropriately specified. 
+
+
+## Plot ACF/PACF of Residuals
+
+```{r, warning=FALSE, message=FALSE}
+library(feasts)
+
+# Jobless Claims Residuals
+claims_aug <- augment(fit_claims) %>%
+  filter(.model == "claims_tsc")
+
+acf(claims_aug$.resid, main = "ACF of Residuals: Jobless Claims")
+pacf(claims_aug$.resid, main = "PACF of Residuals: Jobless Claims")
+
+# Temporary Employment Help
+temp_aug <- augment(fit_temp) %>%
+  filter(.model == "temp_tsc")
+
+acf(temp_aug$.resid, main = "ACF of Residuals: Temp Help Employment")
+pacf(temp_aug$.resid, main = "PACF of Residuals: Temp Help Employment")
+```
+
+For jobless claims, the residual ACF and PACF show no significant remaining autocorrelation, with most spikes lying within confidence bounds. This supports the conclusion that the structured ARIMA model adequately captures serial dependence. 
+
+For temporary help employment, the original structured model exhibited significant residual autocorrelation. However, after revising the model (temp_tsc2), the residual AFC and PACF show no remaining systematic patterns, confirming that the updated specification successfully eliminates serial correlation. 
+
+
+## CUSUM Plot
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(strucchange)
+
+# --- Jobless Claims residuals from claims_tsc ---
+claims_resid <- augment(fit_claims) %>%
+  filter(.model == "claims_tsc") %>%
+  pull(.resid)
+
+# --- Temp Help residuals ---
+# If you're still using fit_temp with temp_tsc:
+temp_resid <- augment(fit_temp) %>%
+  filter(.model == "temp_tsc") %>%
+  pull(.resid)
+
+# If you're using the improved model fit_temp2 with temp_tsc2, use this instead:
+# temp_resid <- augment(fit_temp2) %>%
+#   filter(.model == "temp_tsc2") %>%
+#   pull(.resid)
+
+# CUSUM objects
+claims_cusum <- efp(claims_resid ~ 1, type = "Rec-CUSUM")
+temp_cusum   <- efp(temp_resid ~ 1, type = "Rec-CUSUM")
+
+# Plots
+plot(claims_cusum, main = "CUSUM Test: Jobless Claims Model")
+plot(temp_cusum,   main = "CUSUM Test: Temp Help Employment Model")
+```
+
+The CUSUM plots indicate that the empirical fluctuation process remain within the critical bouds over the sample period. This siggests parameter stability and no strong evidence of structural instability in the estimated models. Although COVID shock introduces large temporary deviations, the recursive residuals remain withi acceptable limits, supporting the rubustness of the model estimates.
+
+
+## Diagnostic Statistics
+
+```{r, warning=FALSE, message=FALSE}
+library(fpp3)
+library(dplyr)
+library(feasts)
+
+# -------------------------
+# 1) Diagnostic statistics (AIC/AICc/BIC/etc.)
+# -------------------------
+glance(fit_claims) %>% filter(.model == "claims_tsc")
+glance(fit_temp)   %>% filter(.model == "temp_tsc")
+
+# -------------------------
+# 2) Ljung–Box on residuals
+# -------------------------
+claims_aug <- augment(fit_claims) %>% filter(.model == "claims_tsc")
+temp_aug   <- augment(fit_temp)   %>% filter(.model == "temp_tsc")
+
+claims_aug %>%
+  as_tsibble(index = date) %>%
+  features(.resid, ljung_box, lag = 24)
+
+temp_aug %>%
+  as_tsibble(index = date) %>%
+  features(.resid, ljung_box, lag = 24)
+
+
+# corrected code
+# Fit revised model (lets ARIMA handle persistence via differencing; still has season + covid)
+fit_temp2 <- labor_df2 %>%
+  model(
+    temp_tsc2 = ARIMA(log_temp ~ season() + covid)
+  )
+
+report(fit_temp2)
+
+temp_aug2 <- augment(fit_temp2) %>% filter(.model == "temp_tsc2")
+
+# Ljung–Box for revised model
+temp_aug2 %>%
+  as_tsibble(index = date) %>%
+  features(.resid, ljung_box, lag = 24)
+
+# Residual ACF/PACF (base R)
+acf(temp_aug2$.resid, main = "ACF Residuals: temp_tsc2")
+pacf(temp_aug2$.resid, main = "PACF Residuals: temp_tsc2")
+```
+
+The Ljung-Box test for jobless claims yeinds a p-valye of 0.772, indicating failure to reject the null hypothesis of no residual autocorrelation. This confirms that the claims model residuals behave as white noise. 
+
+For the initial temporary employment model, the Ljung-Box test strongly rejects the null (p=0), indicating remaining serial correlation. After revising the specification (temp_tsc2), the Ljung-Box p-value increases to 1.000, confirming that the revised model successfully eliminates residual autocorrelation. Therefore, temp_tsc2 is the preferred specification. 
+
+
+## Forecast 12-step-ahead 
+
+```{r, warning=FALSE, message=FALSE}
+library(fpp3)
+library(dplyr)
+
+future_12 <- labor_df2 %>%
+  new_data(n = 12) %>%
+  mutate(covid = 0)
+
+# --- Jobless Claims forecast ---
+fc_claims <- fit_claims %>%
+  forecast(new_data = future_12) %>%
+  filter(.model == "claims_tsc")
+
+autoplot(fc_claims, labor_df2) +
+  labs(title = "12-Month Forecast: Jobless Claims (with intervals)",
+       y = "log(Jobless Claims)", x = "Date")
+
+# --- Temp Help forecast (revised model) ---
+fc_temp <- fit_temp2 %>%
+  forecast(new_data = future_12) %>%
+  filter(.model == "temp_tsc2")
+
+autoplot(fc_temp, labor_df2) +
+  labs(title = "12-Month Forecast: Temp Help Employment (with intervals)",
+       y = "log(Temp Help Employment)", x = "Date")
+```
+
+The 12-step-ahead forecast show mean-reverting behavior for both variables. Jobless claims are projected to stabilize around recent levels, with widening confidence intervals as the forecast horizon increases. Temporary help employment similarly shoes gradual stabiliztion, reflecting the persistence captured in the ARIMA dynamics. The expanding error bands reflect increasing uncertainty over time, as expected in time-series forecasting. 
+
+
+## Compare Forecast to auto.arima()
+
+```{r, warning=FALSE, message=FALSE}
+# create train/test split
+n_test <- 12
+
+train <- labor_df2 %>% slice(1:(nrow(labor_df2) - n_test))
+test  <- labor_df2 %>% slice((nrow(labor_df2) - n_test + 1):nrow(labor_df2))
+
+# refit model on train data
+# jobless claims
+fit_claims_train <- train %>%
+  model(
+    claims_tsc  = ARIMA(log_claims ~ trend() + season() + covid),
+    claims_auto = ARIMA(log_claims)
+  )
+
+# temp employment
+fit_temp_train <- train %>%
+  model(
+    temp_tsc2  = ARIMA(log_temp ~ season() + covid),
+    temp_auto  = ARIMA(log_temp)
+  )
+
+# create future data
+future_12 <- test[, c("date", "covid")]
+
+# forecast 12-step ahead
+# jobless claims
+fc_claims_test <- fit_claims_train %>%
+  forecast(new_data = future_12)
+
+# temp employment
+fc_temp_test <- fit_temp_train %>%
+  forecast(new_data = future_12)
+
+# compute MAPE
+accuracy(fc_claims_test, test)[, c(".model", "MAPE")]
+accuracy(fc_temp_test, test)[, c(".model", "MAPE")]
+```
+
+The structured ARIMA model outperforms the automatic ARIMA model for both series. For jobless claims, the structured model achieves a lower MAPE (0.414) compared to the auto model (0.487). For temporary help employment, the revised structured model (temp_tsc2) achieves a lower MAPE (0.353) compared to the auto model (0.384). These results indicate that incorporating trend, seasonality, and intervention effects improve out-of-sample forecast accuracy. 
+
+
+## Forecast Combination
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(tidyr)
+
+# -------------------------
+# JOBLESS CLAIMS: combine claims_tsc + claims_auto
+# -------------------------
+
+# extract needed columns without select()
+fc_claims_df <- as_tibble(fc_claims_test)[, c("date", ".model", ".mean")]
+
+claims_wide <- fc_claims_df %>%
+  pivot_wider(names_from = .model, values_from = .mean)
+
+claims_wide <- claims_wide %>%
+  mutate(combo = (claims_tsc + claims_auto) / 2)
+
+# actuals (no select())
+claims_actual <- test[, c("date", "log_claims")]
+
+claims_compare <- left_join(claims_wide, claims_actual, by = "date")
+
+claims_mape_combo <- mean(
+  abs((claims_compare$log_claims - claims_compare$combo) / claims_compare$log_claims),
+  na.rm = TRUE
+) * 100
+
+claims_mape_combo
+
+
+# -------------------------
+# TEMP HELP: combine temp_tsc2 + temp_auto
+# -------------------------
+
+fc_temp_df <- as_tibble(fc_temp_test)[, c("date", ".model", ".mean")]
+
+temp_wide <- fc_temp_df %>%
+  pivot_wider(names_from = .model, values_from = .mean) %>%
+  mutate(combo = (temp_tsc2 + temp_auto) / 2)
+
+temp_actual <- test[, c("date", "log_temp")]
+
+temp_compare <- left_join(temp_wide, temp_actual, by = "date")
+
+temp_mape_combo <- mean(
+  abs((temp_compare$log_temp - temp_compare$combo) / temp_compare$log_temp),
+  na.rm = TRUE
+) * 100
+
+temp_mape_combo
+```
+
+The combines forecast produces a MAPE of 0.400 for jobless claims and a 0.369 for temporary employment. For jobless claims, the combination slightly improves upon the structured model. For temporary employment, the combination performs slightly worse than the best individual model (temp_tsc2). This suggests that forecast combination can stabilize errors but does not necessarily outperform the best-performing specification in all cases. 
+
+
+## Fit VAR() Model
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(lubridate)
+library(vars)
+
+# 1) Create stationary variables (first differences of logs)
+var_df <- labor_df2 %>%
+  mutate(
+    d_claims = difference(log_claims),
+    d_temp   = difference(log_temp)
+  ) %>%
+  filter(!is.na(d_claims), !is.na(d_temp))
+
+# 2) Convert to ts object for VAR()
+var_ts <- ts(
+  as.matrix(var_df[, c("d_claims", "d_temp")]),
+  frequency = 12,
+  start = c(year(min(var_df$date)),
+            month(min(var_df$date)))
+)
+
+# Quick sanity check
+anyNA(var_ts)
+
+# 3) Select lag length using AIC
+lag_selection <- VARselect(var_ts, lag.max = 12, type = "const")
+lag_selection$selection
+
+p <- as.integer(lag_selection$selection["AIC(n)"])
+if (is.na(p)) p <- 2   # fallback if needed
+
+p
+
+# 4) Fit VAR(p)
+var_model <- VAR(var_ts, p = p, type = "const")
+summary(var_model)
+
+# relevant plots
+plot(var_ts,
+     main = "VAR Inputs: Δlog(Jobless Claims) and Δlog(Temp Employment)")
+
+serial.test(var_model, lags.pt = 12, type = "PT.asymptotic")
+
+roots(var_model)
+
+stability_test <- stability(var_model, type = "OLS-CUSUM")
+plot(stability_test)
+```
+
+The VAR(6) model, selected via AIC, is dynamically stable as all roots lie inside the unit circle. The Portmanteau test yields a p-value of 0.1233, indicating no significant residual autocorrelation. In the d_claims equation, several own lags are statistically significant, indicating persistence in changes in jobless claims. In the d_temp equation, multiple lagged values of d_claims are highly significant, suggesting that changes in jobless claims strongly influence subsequent changes in temporary employment. The model captures meaningful dynamics interdependence between the two labor market indicators. 
+
+
+## Compute Impulse Response Function
+
+```{r, warning=FALSE, message=FALSE}
+var_ts_reordered <- var_ts[, c("d_temp", "d_claims")]
+
+var_model <- VAR(var_ts_reordered, p = p, type = "const")
+
+irf_temp_shock <- irf(
+  var_model,
+  impulse = "d_temp",
+  response = "d_claims",
+  n.ahead = 24,
+  boot = TRUE,
+  ci = 0.95
+)
+
+irf_claims_shock <- irf(
+  var_model,
+  impulse = "d_claims",
+  response = "d_temp",
+  n.ahead = 24,
+  boot = TRUE,
+  ci = 0.95
+)
+
+
+plot(irf_temp_shock,
+     main = "IRF: Shock to Temp Employment → Jobless Claims")
+
+plot(irf_claims_shock,
+     main = "IRF: Shock to Jobless Claims → Temp Employment")
+```
+
+The impulse response functions show that a positive shock to temporary employment generates a modest short-run response in jobless claims that dissipates over time. Conversely, a positive shock to jobless claims produces a statistically significant negative responses gradually permanent. These results support the presence of dynamic feedback between the two variables. 
+
+
+## Granger-Causality
+
+```{r, warning=FALSE, message=FALSE}
+granger_temp_to_claims <- causality(var_model, cause = "d_temp")
+granger_temp_to_claims
+
+granger_claims_to_temp <- causality(var_model, cause = "d_claims")
+granger_claims_to_temp
+```
+
+The Granger causality test indicates that temporary employment does not Granger-cause jobless claims (p=0.1497), as we fail to reject the null hypothesis. However, jobless claims strongly Granger-cause temporary employment (p<2.2e-16). This suggests that past changes in claims contain predictive information for temporary employment, but not vice versa. Instantaneous causality is present in both directions, as indicated by the significant chi-squared test. Overall, predictive direction appears to run primarily from jobless claims to temporary employment.  
+
+
+## VAR() 12-step-ahead Forecast
+
+```{r, warning=FALSE, message=FALSE}
+# 12-step ahead VAR forecast
+var_forecast <- predict(var_model, n.ahead = 12, ci = 0.95)
+
+# Extract forecasts for differenced series
+fc_d_temp   <- var_forecast$fcst$d_temp
+fc_d_claims <- var_forecast$fcst$d_claims
+
+# Create horizon index
+h <- 1:12
+
+# Temp employment forecast
+temp_var_df <- data.frame(
+  horizon = h,
+  forecast = fc_d_temp[,1],
+  lower = fc_d_temp[,2],
+  upper = fc_d_temp[,3]
+)
+
+# Claims forecast
+claims_var_df <- data.frame(
+  horizon = h,
+  forecast = fc_d_claims[,1],
+  lower = fc_d_claims[,2],
+  upper = fc_d_claims[,3]
+)
+
+library(ggplot2)
+
+ggplot(temp_var_df, aes(x = horizon, y = forecast)) +
+  geom_line(color = "blue") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
+  labs(title = "VAR Forecast: Δlog(Temp Employment)",
+       y = "Forecast",
+       x = "Months Ahead")
+
+ggplot(claims_var_df, aes(x = horizon, y = forecast)) +
+  geom_line(color = "red") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
+  labs(title = "VAR Forecast: Δlog(Jobless Claims)",
+       y = "Forecast",
+       x = "Months Ahead")
+```
+
+The VAR forecasts of the differenced series show mean-reverting dynamics, with both variables gradually converging toward zero growth. Forecast intervals widen as the horizon increases, reflecting accumulated uncertainty. Compared to the univariate ARIMA forecasts, the VAR forecasts are smoother and reflect cross-variable interactions. However, given the stronger univariate MAPE performance, the structured ARIMA models provide slightly between short-run predictive accuracy. 
+
+
+---
+
+# Conclusion 
+
+## Final Thoughts 
+
+This project set out to determine whether temporary help services employment contains predictive information about future movements in jobless claims and whether modeling their joint dynamics improves short-term forecasting performance. 
+
+Taken together, the evidence suggests that while the two labor market indicators are dynamically interconnected, the predictive direction runs primarily from jobless claims to temporary employment rather than the reverse. This finding challenges the common view that temporary help employment consistently acts as a leading indicator of labor market distress. Instead, changes in jobless claims appear to provide more immediate information about shifts in labor market conditions. 
+
+From a forecasting perspective, incorporating economic structure through carefully specified univariate ARIMA models proved highly effective. Although the VAR framework captures meaningful cross-variable dynamics and provides useful insights into transimission mechanisms, it does not deliver clear improvements in short-horion forecast accuracy realtive to the best univariate specifications. This highlghts an important practical implication: greater model complexity does not automatically translate into better predictive performance. 
+
+Overall, the results reinforce the importance of jobless claims as a timely indicator of labor market stress and suggest that multivariate modeling is more valuable for understanding economic dynamics than for improving short-run forecasting accuracy in this context.
+
+
+## Future Work
+
+Future research could extent this analysis by exploring longer-run relationships between the variables, testing for cointegration, or implementing structural identification strategies to between isolate economically meaningful shocks. Additionally, incorporating broader labor market indicators may clarify whether temporary employment plays a stronger leading role within a richer multivariate system.
+
+Further work could also examine nonlinear dynamics or regime-dependent behavior, particularly during periods of extreme economic disruption such as the COVID-19 recession. These extensions would help determine whether the predictive relationships observed here are stable across different economic environment. 
+
+
+---
+
+\newpage
+
+# References 
+
+  * Autor, D. H., & Houseman, S. N. (2010). Do temporary-help jobs improve labor market outcomes for low-skilled workers? Evidence from “Work First”. MIT Shaping the Future of Work Initiative. https://shapingwork.mit.edu/wp-content/uploads/2023/10/Autor-Houseman-July-2010.pdf
+
+  * Federal Reserve Bank of St. Louis. (n.d.). All employees: Temporary help services (TEMPHELPS). FRED, Federal Reserve Economic Data. https://fred.stlouisfed.org/series/TEMPHELPS
+
+  * Federal Reserve Bank of St. Louis. (n.d.). Initial claims (ICSA). FRED, Federal Reserve Economic Data. https://fred.stlouisfed.org/series/ICSA
+
+  * Houseman, S. N. (2014). Temporary help employment as a leading indicator of the economy. Employment Research, W.E. Upjohn Institute for Employment Research. https://research.upjohn.org/cgi/viewcontent.cgi?article=1241&context=empl_research
